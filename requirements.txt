@@ -1,7 +1,8 @@
 streamlit
 openai-whisper
 torch
-librosa
-jiwer
-soundfile
 numpy
+librosa
+soundfile
+jiwer
+streamlit-audiorec
