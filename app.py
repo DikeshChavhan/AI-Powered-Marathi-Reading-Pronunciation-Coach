@@ -1,150 +1,130 @@
 import streamlit as st
 import whisper
+import soundfile as sf
 import librosa
+import os
 import numpy as np
-import re
 from jiwer import wer
-from difflib import SequenceMatcher
+from st_audiorec import st_audiorec
 
-# --------------------------------------------------
-# Helper Functions
-# --------------------------------------------------
-
-def normalize_text(text):
-    text = text.lower()
-    text = re.sub(r"[^\u0900-\u097F\s]", "", text)  # Devanagari only
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def pronunciation_score(expected_text, predicted_text):
-    expected_norm = normalize_text(expected_text)
-    predicted_norm = normalize_text(predicted_text)
-
-    error_rate = wer(expected_norm, predicted_norm)
-    raw_accuracy = (1 - error_rate) * 100
-    accuracy = max(0, min(100, raw_accuracy))
-
-    # Accuracy → Level
-    if accuracy < 30:
-        level = "Needs Improvement"
-    elif accuracy < 60:
-        level = "Developing"
-    elif accuracy < 80:
-        level = "Good"
-    else:
-        level = "Excellent"
-
-    # Word-level differences
-    ref_words = expected_norm.split()
-    hyp_words = predicted_norm.split()
-
-    matcher = SequenceMatcher(None, ref_words, hyp_words)
-    mistakes = []
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag != "equal":
-            mistakes.append((
-                " ".join(ref_words[i1:i2]),
-                " ".join(hyp_words[j1:j2])
-            ))
-
-    return accuracy, level, mistakes, expected_norm, predicted_norm
-
-
-def fluency_score(audio_array, sr, spoken_text):
-    duration = librosa.get_duration(y=audio_array, sr=sr)
-    words = spoken_text.split()
-    wpm = (len(words) / duration) * 60 if duration > 0 else 0
-
-    if wpm < 60:
-        fluency = "Very Slow"
-    elif wpm < 90:
-        fluency = "Slow"
-    elif wpm < 120:
-        fluency = "Average"
-    elif wpm < 150:
-        fluency = "Good"
-    else:
-        fluency = "Excellent"
-
-    return round(wpm, 2), fluency, round(duration, 2)
-
-
-# --------------------------------------------------
-# Streamlit UI
-# --------------------------------------------------
-
+# -------------------------------
+# Page Config
+# -------------------------------
 st.set_page_config(
-    page_title="AI-Powered Marathi Reading Coach",
+    page_title="AI-Powered Marathi Reading & Pronunciation Coach",
+    page_icon="📖",
     layout="centered"
 )
 
 st.title("📖 AI-Powered Marathi Reading & Pronunciation Coach")
-st.write(
-    "Upload a Marathi reading audio and get **pronunciation** and **fluency** feedback."
-)
+st.write("Upload or record Marathi reading audio and get pronunciation & fluency feedback.")
 
+# -------------------------------
+# Expected Text
+# -------------------------------
+st.subheader("📘 Expected Text (What the student should read)")
 expected_text = st.text_area(
-    "📘 Expected Text (What the student should read)",
+    "",
     "टिळकांनी गीतेचा कर्मयोग असा अर्थ लावला आहे."
 )
 
-audio_file = st.file_uploader(
-    "🎤 Upload Audio (MP3 / WAV)",
+# -------------------------------
+# Audio Input Options
+# -------------------------------
+st.subheader("🎤 Read Aloud (Mic Recording)")
+mic_audio = st_audiorec()
+
+uploaded_file = st.file_uploader(
+    "📂 Or Upload Audio (MP3 / WAV)",
     type=["mp3", "wav"]
 )
 
-if audio_file:
-    # Load audio safely (NO ffmpeg required)
-    audio_array, sr = librosa.load(audio_file, sr=16000)
+audio_path = None
 
-    st.audio(audio_file)
+# -------------------------------
+# Handle Mic Audio
+# -------------------------------
+if mic_audio is not None:
+    audio_path = "recorded_audio.wav"
+    with open(audio_path, "wb") as f:
+        f.write(mic_audio)
+    st.audio(audio_path)
 
-    if st.button("🧠 Analyze Reading"):
-        with st.spinner("Loading ASR model..."):
-            model = whisper.load_model("small")
+# -------------------------------
+# Handle Uploaded Audio
+# -------------------------------
+elif uploaded_file is not None:
+    audio_path = "uploaded_audio.wav"
+    with open(audio_path, "wb") as f:
+        f.write(uploaded_file.read())
+    st.audio(audio_path)
 
-        with st.spinner("Transcribing audio..."):
-            result = model.transcribe(
-                audio_array,
-                language="mr",
-                temperature=0.0,
-                beam_size=5,
-                best_of=5,
-                condition_on_previous_text=False,
-                no_speech_threshold=0.2,
-                logprob_threshold=-1.0
-            )
+# -------------------------------
+# Analyze Button
+# -------------------------------
+if st.button("🧠 Analyze Reading"):
 
+    if audio_path is None:
+        st.warning("Please record or upload audio first.")
+        st.stop()
+
+    # Load ASR model
+    with st.spinner("Loading ASR model..."):
+        model = whisper.load_model("small")
+
+    # Transcribe
+    with st.spinner("Transcribing audio..."):
+        result = model.transcribe(audio_path, language="mr")
         predicted_text = result["text"].strip()
 
-        accuracy, level, mistakes, exp_norm, pred_norm = pronunciation_score(
-            expected_text, predicted_text
-        )
+    st.subheader("📝 Predicted Text")
+    st.write(predicted_text)
 
-        wpm, fluency, duration = fluency_score(audio_array, sr, pred_norm)
+    # -------------------------------
+    # Pronunciation Accuracy
+    # -------------------------------
+    def normalize(text):
+        return text.replace("।", "").strip()
 
-        # --------------------------------------------------
-        # OUTPUT
-        # --------------------------------------------------
+    expected_norm = normalize(expected_text)
+    predicted_norm = normalize(predicted_text)
 
-        st.subheader("📝 Transcription")
-        st.write(pred_norm if pred_norm else "_No clear speech detected_")
+    try:
+        error_rate = wer(expected_norm, predicted_norm)
+        accuracy = max(0, round((1 - error_rate) * 100, 2))
+    except:
+        accuracy = 0.0
 
-        st.subheader("🎯 Pronunciation Result")
-        st.write(f"**Level:** {level}")
-        st.write(f"**Accuracy:** {accuracy:.2f}%")
+    st.subheader("🎯 Pronunciation Accuracy")
+    st.metric(label="Accuracy", value=f"{accuracy}%")
 
-        st.subheader("⏱ Fluency")
-        st.write(f"**{wpm} WPM** ({fluency})")
-        st.write(f"Audio Duration: {duration} seconds")
+    # -------------------------------
+    # Fluency (WPM)
+    # -------------------------------
+    y, sr = librosa.load(audio_path, sr=None)
+    duration_sec = librosa.get_duration(y=y, sr=sr)
+    word_count = len(predicted_norm.split())
 
-        st.subheader("❌ Pronunciation Mistakes")
-        if len(pred_norm.split()) < 3:
-            st.warning("Please read the full sentence clearly.")
-        elif mistakes:
-            for ref, hyp in mistakes:
-                st.write(f"- Expected: **{ref}** → Spoken: **{hyp}**")
-        else:
-            st.success("Great pronunciation! 🎉")
+    wpm = round((word_count / duration_sec) * 60, 2) if duration_sec > 0 else 0
+
+    st.subheader("⏱ Fluency")
+    st.write(f"**Words Per Minute (WPM):** {wpm}")
+    st.write(f"**Audio Duration:** {round(duration_sec, 2)} seconds")
+
+    # -------------------------------
+    # Interpretation
+    # -------------------------------
+    if wpm < 60:
+        fluency_level = "Very Slow"
+    elif wpm < 90:
+        fluency_level = "Slow"
+    elif wpm < 130:
+        fluency_level = "Good"
+    else:
+        fluency_level = "Excellent"
+
+    st.info(f"📊 Fluency Level: **{fluency_level}**")
+
+    # Cleanup
+    if os.path.exists(audio_path):
+        os.remove(audio_path)
