@@ -1,16 +1,18 @@
 import streamlit as st
 import whisper
 import librosa
+import numpy as np
 import re
 from jiwer import wer
 from difflib import SequenceMatcher
 
-# ----------------------------
+# --------------------------------------------------
 # Helper Functions
-# ----------------------------
+# --------------------------------------------------
+
 def normalize_text(text):
     text = text.lower()
-    text = re.sub(r"[^\u0900-\u097F\s]", "", text)
+    text = re.sub(r"[^\u0900-\u097F\s]", "", text)  # Devanagari only
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -33,7 +35,7 @@ def pronunciation_score(expected_text, predicted_text):
     else:
         level = "Excellent"
 
-    # Word differences
+    # Word-level differences
     ref_words = expected_norm.split()
     hyp_words = predicted_norm.split()
 
@@ -50,10 +52,8 @@ def pronunciation_score(expected_text, predicted_text):
     return accuracy, level, mistakes, expected_norm, predicted_norm
 
 
-def fluency_score(audio_path, spoken_text):
-    audio, sr = librosa.load(audio_path, sr=None)
-    duration = librosa.get_duration(y=audio, sr=sr)
-
+def fluency_score(audio_array, sr, spoken_text):
+    duration = librosa.get_duration(y=audio_array, sr=sr)
     words = spoken_text.split()
     wpm = (len(words) / duration) * 60 if duration > 0 else 0
 
@@ -71,53 +71,66 @@ def fluency_score(audio_path, spoken_text):
     return round(wpm, 2), fluency, round(duration, 2)
 
 
-# ----------------------------
+# --------------------------------------------------
 # Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Marathi Reading Coach", layout="centered")
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="AI-Powered Marathi Reading Coach",
+    layout="centered"
+)
 
 st.title("📖 AI-Powered Marathi Reading & Pronunciation Coach")
-st.write("Upload a Marathi reading audio and get pronunciation & fluency feedback.")
+st.write(
+    "Upload a Marathi reading audio and get **pronunciation** and **fluency** feedback."
+)
 
 expected_text = st.text_area(
     "📘 Expected Text (What the student should read)",
     "टिळकांनी गीतेचा कर्मयोग असा अर्थ लावला आहे."
 )
 
-audio_file = st.file_uploader("🎤 Upload Audio (MP3/WAV)", type=["mp3", "wav"])
+audio_file = st.file_uploader(
+    "🎤 Upload Audio (MP3 / WAV)",
+    type=["mp3", "wav"]
+)
 
 if audio_file:
-    with open("temp_audio.wav", "wb") as f:
-        f.write(audio_file.read())
+    # Load audio safely (NO ffmpeg required)
+    audio_array, sr = librosa.load(audio_file, sr=16000)
 
-    st.audio("temp_audio.wav")
+    st.audio(audio_file)
 
     if st.button("🧠 Analyze Reading"):
-        st.info("Loading ASR model...")
-        model = whisper.load_model("small")
+        with st.spinner("Loading ASR model..."):
+            model = whisper.load_model("small")
 
-        st.info("Transcribing audio...")
-        result = model.transcribe(
-            "temp_audio.wav",
-            language="mr",
-            temperature=0.0,
-            beam_size=5,
-            best_of=5,
-            condition_on_previous_text=False,
-            no_speech_threshold=0.2,
-            logprob_threshold=-1.0
-        )
+        with st.spinner("Transcribing audio..."):
+            result = model.transcribe(
+                audio_array,
+                language="mr",
+                temperature=0.0,
+                beam_size=5,
+                best_of=5,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.2,
+                logprob_threshold=-1.0
+            )
 
-        predicted_text = result["text"]
+        predicted_text = result["text"].strip()
 
         accuracy, level, mistakes, exp_norm, pred_norm = pronunciation_score(
             expected_text, predicted_text
         )
 
-        wpm, fluency, duration = fluency_score("temp_audio.wav", pred_norm)
+        wpm, fluency, duration = fluency_score(audio_array, sr, pred_norm)
+
+        # --------------------------------------------------
+        # OUTPUT
+        # --------------------------------------------------
 
         st.subheader("📝 Transcription")
-        st.write(pred_norm)
+        st.write(pred_norm if pred_norm else "_No clear speech detected_")
 
         st.subheader("🎯 Pronunciation Result")
         st.write(f"**Level:** {level}")
@@ -128,3 +141,10 @@ if audio_file:
         st.write(f"Audio Duration: {duration} seconds")
 
         st.subheader("❌ Pronunciation Mistakes")
+        if len(pred_norm.split()) < 3:
+            st.warning("Please read the full sentence clearly.")
+        elif mistakes:
+            for ref, hyp in mistakes:
+                st.write(f"- Expected: **{ref}** → Spoken: **{hyp}**")
+        else:
+            st.success("Great pronunciation! 🎉")
