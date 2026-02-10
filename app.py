@@ -1,15 +1,16 @@
 import streamlit as st
 import whisper
-import soundfile as sf
 import librosa
 import os
 import numpy as np
 from jiwer import wer
-from st_audiorec import st_audiorec
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+import av
+import queue
 
-# -------------------------------
-# Page Config
-# -------------------------------
+# -----------------------------
+# Page config
+# -----------------------------
 st.set_page_config(
     page_title="AI-Powered Marathi Reading & Pronunciation Coach",
     page_icon="📖",
@@ -17,62 +18,77 @@ st.set_page_config(
 )
 
 st.title("📖 AI-Powered Marathi Reading & Pronunciation Coach")
-st.write("Upload or record Marathi reading audio and get pronunciation & fluency feedback.")
+st.write("Record or upload Marathi reading audio and get pronunciation & fluency feedback.")
 
-# -------------------------------
+# -----------------------------
 # Expected Text
-# -------------------------------
-st.subheader("📘 Expected Text (What the student should read)")
+# -----------------------------
+st.subheader("📘 Expected Text")
 expected_text = st.text_area(
     "",
     "टिळकांनी गीतेचा कर्मयोग असा अर्थ लावला आहे."
 )
 
-# -------------------------------
-# Audio Input Options
-# -------------------------------
+# -----------------------------
+# Audio Recorder (Mic)
+# -----------------------------
 st.subheader("🎤 Read Aloud (Mic Recording)")
-mic_audio = st_audiorec()
 
+class AudioRecorder(AudioProcessorBase):
+    def __init__(self):
+        self.audio_frames = queue.Queue()
+
+    def recv(self, frame: av.AudioFrame):
+        self.audio_frames.put(frame)
+        return frame
+
+ctx = webrtc_streamer(
+    key="marathi-reader",
+    audio_processor_factory=AudioRecorder,
+    media_stream_constraints={"audio": True, "video": False},
+)
+
+audio_path = None
+
+if ctx.audio_processor:
+    if st.button("⏹ Stop & Save Recording"):
+        frames = []
+        while not ctx.audio_processor.audio_frames.empty():
+            frame = ctx.audio_processor.audio_frames.get()
+            frames.append(frame.to_ndarray())
+
+        if frames:
+            audio = np.concatenate(frames, axis=1)
+            audio_path = "recorded_audio.wav"
+            librosa.output.write_wav(audio_path, audio.flatten(), sr=16000)
+            st.success("Recording saved successfully!")
+            st.audio(audio_path)
+
+# -----------------------------
+# Upload Audio Option
+# -----------------------------
 uploaded_file = st.file_uploader(
     "📂 Or Upload Audio (MP3 / WAV)",
     type=["mp3", "wav"]
 )
 
-audio_path = None
-
-# -------------------------------
-# Handle Mic Audio
-# -------------------------------
-if mic_audio is not None:
-    audio_path = "recorded_audio.wav"
-    with open(audio_path, "wb") as f:
-        f.write(mic_audio)
-    st.audio(audio_path)
-
-# -------------------------------
-# Handle Uploaded Audio
-# -------------------------------
-elif uploaded_file is not None:
+if uploaded_file is not None:
     audio_path = "uploaded_audio.wav"
     with open(audio_path, "wb") as f:
         f.write(uploaded_file.read())
     st.audio(audio_path)
 
-# -------------------------------
-# Analyze Button
-# -------------------------------
+# -----------------------------
+# Analyze
+# -----------------------------
 if st.button("🧠 Analyze Reading"):
-
     if audio_path is None:
         st.warning("Please record or upload audio first.")
         st.stop()
 
-    # Load ASR model
     with st.spinner("Loading ASR model..."):
         model = whisper.load_model("small")
 
-    # Transcribe
     with st.spinner("Transcribing audio..."):
         result = model.transcribe(audio_path, language="mr")
         predicted_text = result["text"].strip()
@@ -80,9 +96,9 @@ if st.button("🧠 Analyze Reading"):
     st.subheader("📝 Predicted Text")
     st.write(predicted_text)
 
-    # -------------------------------
+    # -----------------------------
     # Pronunciation Accuracy
-    # -------------------------------
+    # -----------------------------
     def normalize(text):
         return text.replace("।", "").strip()
 
@@ -96,35 +112,18 @@ if st.button("🧠 Analyze Reading"):
         accuracy = 0.0
 
     st.subheader("🎯 Pronunciation Accuracy")
-    st.metric(label="Accuracy", value=f"{accuracy}%")
+    st.metric("Accuracy", f"{accuracy}%")
 
-    # -------------------------------
-    # Fluency (WPM)
-    # -------------------------------
+    # -----------------------------
+    # Fluency
+    # -----------------------------
     y, sr = librosa.load(audio_path, sr=None)
-    duration_sec = librosa.get_duration(y=y, sr=sr)
-    word_count = len(predicted_norm.split())
-
-    wpm = round((word_count / duration_sec) * 60, 2) if duration_sec > 0 else 0
+    duration = librosa.get_duration(y=y, sr=sr)
+    wpm = round((len(predicted_norm.split()) / duration) * 60, 2)
 
     st.subheader("⏱ Fluency")
-    st.write(f"**Words Per Minute (WPM):** {wpm}")
-    st.write(f"**Audio Duration:** {round(duration_sec, 2)} seconds")
-
-    # -------------------------------
-    # Interpretation
-    # -------------------------------
-    if wpm < 60:
-        fluency_level = "Very Slow"
-    elif wpm < 90:
-        fluency_level = "Slow"
-    elif wpm < 130:
-        fluency_level = "Good"
-    else:
-        fluency_level = "Excellent"
-
-    st.info(f"📊 Fluency Level: **{fluency_level}**")
+    st.write(f"**Words Per Minute:** {wpm}")
+    st.write(f"**Audio Duration:** {round(duration, 2)} seconds")
 
     # Cleanup
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
+    os.remove(audio_path)
