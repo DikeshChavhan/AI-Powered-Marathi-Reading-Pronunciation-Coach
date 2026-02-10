@@ -5,5 +5,3 @@ numpy
 librosa
 soundfile
 jiwer
-streamlit-webrtc
-av
